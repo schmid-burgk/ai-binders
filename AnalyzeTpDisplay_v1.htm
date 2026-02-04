@@ -1,0 +1,202 @@
+
+<meta http-equiv="Content-Script-Type" content="text/javascript">
+<META HTTP-EQUIV="CACHE-CONTROL" CONTENT="NO-CACHE">
+    <html>
+        <style>
+            a:link {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+            a:visited {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+        </style>
+        <head>
+            <title>Analyze Transposon-Display data v1</title>
+        </head>
+        <body style="margin: 0; font-family: Helvetica; font-weight: 100; background-size: 200vw 200vh" background="brown1.jpg">
+            <div style="background-color: rgba(255,255,255,0.2); margin: 0.5%; padding: 1%; width: 97%; height: 100%">
+
+                <b>AI-Binder Screening Suite: AnalyzeTpDisplay v1</b>
+                <br>JSB Lab, University of Bonn
+                <br>jsb@uni-bonn.de
+
+                <br>
+                <br>Constant sequence before binder coding sequence:
+                <br><input id="filter" value="ATGACATG" />
+                <br>
+                <br>Paste binder library (binder name \t binder sequence, no header):
+                <br><textarea id="OligoList" rows="20" cols="100"></textarea>
+                <br>
+                <br>FASTQ or fastq.gz files:<br><input type="file" id="files" name="files[]" multiple />
+                <br>
+                <br><button onclick="Start();">Start analysis</button>
+
+                <div id="save" style = "display:none">test</div>
+                <div id='help'></div>
+            </div>
+        </body>
+    </html>
+
+    <script type="text/javascript" src="pako_inflate.min.js"></script>
+    <script>
+
+        function CreateInflator()
+        {
+          var enable_windows_gzip=32;
+          inflator = new pako.Inflate({
+            to: 'string',
+            enable_windows_gzip
+          });
+          inflator.onData = FileChunkDecrypted;
+          inflator.onEnd = function(chunk)
+          {
+            CurrentFilePos -= inflator.strm.avail_in; //shift file reader by offset of next compression chunk
+            if (CurrentFilePos < 0) CurrentFilePos = 0;
+            CreateInflator(); //create new inflator
+          };
+        }
+        CreateInflator();
+
+        document.getElementById('files').addEventListener('change', Start, false);
+        var compare_len = 20;
+        function Start()
+        {
+            readnum = 0;
+            hitnum = 0;
+            filternum = 0;
+            filter = document.getElementById("filter").value;
+            files = document.getElementById('files').files;
+
+            TargetList = document.getElementById("OligoList").value.split("\n");
+            for (var i=0; i<TargetList.length; i++) TargetList[i] = TargetList[i].split("\t");
+            Matrix = new Uint32Array(TargetList.length*files.length);
+
+            //hash lookup:
+            TargetListLookup = [];
+            for (var i=0; i<TargetList.length; i++) TargetListLookup[TargetList[i][1]] = i;
+            compare_len = TargetList[1][1].length;
+
+            chunksize = 1024*1024; //1024*64;
+            CurrentFileId = 0;
+            CurrentFilePos = 0;
+            RestFromLastChunk = "";
+            ReadNextFileChunk();
+        }
+
+        function ReadNextFileChunk()
+        {
+            reader = new FileReader();
+            reader.onload = FileReceived;
+
+            //check if .gz or not:
+            if (files[CurrentFileId].name.indexOf(".gz") != -1) reader.readAsArrayBuffer(files[CurrentFileId].slice(CurrentFilePos, CurrentFilePos+chunksize));
+            else reader.readAsText(files[CurrentFileId].slice(CurrentFilePos, CurrentFilePos+chunksize));
+
+            //progress display:
+            document.getElementById("help").innerHTML = "File "+(CurrentFileId+1)+": "+Math.round(CurrentFilePos/1000000)+" MB processed, "+Math.round(filternum/readnum*100*10)/10+"% mapped to filter, "+Math.round(hitnum/filternum*100*10)/10+"% mapped to BC."
+        }
+        var examplereads = "";
+        var readnum = 0, pamnum = 0, circnum = 0, shortnum = 0;
+        function FileReceived() //this function is called for every chunk of data.
+        {
+            //check if .gz or not:
+            if (files[CurrentFileId].name.indexOf(".gz") != -1) inflator.push(reader.result);
+            else DataReceived(reader.result);
+
+            reader.result = "";
+            reader = "";
+
+            //load the next chunk of data:
+            CurrentFilePos+=chunksize;
+            if (CurrentFilePos >= files[CurrentFileId].size) //end of file -> next file
+            {
+                CurrentFilePos = 0;
+                RestFromLastChunk = "";
+                CurrentFileId++;
+            }
+            if (CurrentFileId < files.length)
+            {
+              setTimeout("ReadNextFileChunk();",10); //attention: is it safe to assume that the offset by last inflator chunnk is already processed? is it safe to assume that the results are fed into the inflator in the right order?
+            }
+            else //last file is done
+            {
+              setTimeout("getCountTable();",10); //attention: is it safe to assume that the results of the last inflator chunk are processed already?
+            }
+        }
+        function FileChunkDecrypted(chunk)
+        {
+          DataReceived(chunk);
+        };
+
+        
+
+        function DataReceived(input)
+        {
+            var original = RestFromLastChunk+input;
+            var cursor = 0, origlen = original.length;
+
+            var id = CurrentFileId;
+
+            while (true)
+            {
+                var cursor1 = cursor;
+                while (++cursor1<origlen && original[cursor1] != "\n");
+                var cursor2 = cursor1+1;
+                while (++cursor2<origlen && original[cursor2] != "\n");
+                var cursor3 = cursor2+1;
+                while (++cursor3<origlen && original[cursor3] != "\n");
+                var cursor4 = cursor3+1;
+                while (++cursor4<origlen && original[cursor4] != "\n");
+
+                if (cursor4 >= origlen) break;
+                else cursor = cursor4+1;
+                var read = original.slice(cursor1+1,cursor2);
+                var phred = original.slice(cursor3+1,cursor4);
+                var readlen = read.length;
+
+                var filterpos = read.indexOf(filter);
+                if (filterpos != -1)
+                {
+                    var relevant = read.substr(filterpos+filter.length, compare_len);
+                    if (TargetListLookup[relevant] !== undefined)
+                    {
+                        Matrix[TargetList.length*CurrentFileId + TargetListLookup[relevant]]++;
+                        hitnum++
+                    }
+                    filternum++;
+                }
+
+                readnum++;
+            }
+
+            RestFromLastChunk = original.substr(cursor);
+        }
+
+        function getCountTable()
+        {
+            var out = "binder_name\tseed_sequence";
+            for (var f=0; f<files.length; f++) out += "\t"+files[f].name;
+            out += "\n";
+
+            for (var i=0; i<TargetList.length; i++)
+            {
+                out += TargetList[i][0]+"\t"+TargetList[i][1];
+                for (var f=0; f<files.length; f++) out += "\t"+Matrix[f*TargetList.length + i];
+                out += "\n";
+            }
+
+            var bb = new Blob([out], {type: 'text/plain'});
+            var a = document.createElement('a');
+            a.download = "count_table.txt";
+            a.href = window.URL.createObjectURL(bb);
+            a.textContent = 'Klick here to save';
+            a.dataset.downloadurl = ['text/plain', a.download, a.href].join(':');
+            document.getElementById("save").appendChild(a);
+            a.click();
+        }
+
+        </script>

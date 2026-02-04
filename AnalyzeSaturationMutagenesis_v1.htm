@@ -1,0 +1,306 @@
+
+<!--
+==============================================================================
+
+Copyright 2021-2026 by Jonathan Schmid-Burgk
+
+==============================================================================
+-->
+
+
+<meta http-equiv="Content-Script-Type" content="text/javascript">
+<META HTTP-EQUIV="CACHE-CONTROL" CONTENT="NO-CACHE">
+<html>
+    <style>
+        a:link {
+          color: black;
+          background-color: transparent;
+          text-decoration: underline;
+        }
+        a:visited {
+          color: black;
+          background-color: transparent;
+          text-decoration: underline;
+        }
+    </style>
+    <head>
+        <title>Analyze saturation mutagenesis data v1</title>
+    </head>
+    <body style="margin: 0; font-family: Helvetica; font-weight: 100; background-size: 200vw 200vh" background="brown1.jpg">
+        <div style="background-color: rgba(255,255,255,0.2); margin: 0.5%; padding: 1%; width: 97%; height: 100%">
+            <b>AI-Binder Screening Suite: AnalyzeSaturationMutagenesis v1</b>
+            <br>JSB Lab, University of Bonn
+            <br>jsb@uni-bonn.de
+
+            <br>
+            <br>Open reading frame DNA sequence that was mutagenized:
+            <br><input id="ref_orf" value=""/>
+            <br>
+            <br>Oligo pool (first entry must be non-mutated, all others must contain one NNN or NNK codon):
+            <br><textarea id="filter" value=""></textarea>
+            <br>
+            <br>Forward PCR primer length:
+            <br><input id="randomstart" value="23"/>
+            <br>
+            <br>Sentinel silent mutation range (default: 18):
+            <br><input id="flanking_length" value="18"/>
+            <br>
+            <br>FFASTQ or fastq.gz files (only read 1):
+            <br><input type="file" id="files" name="files[]" multiple />
+            <br>
+            <br><button onclick='Start();'>Start</button>
+
+            <div id='help' class="helpbox" style="display:none;"></div>
+            <div id='progress'></div>
+            <div id="save" style = "display:none">test</div>
+        </div>
+
+    </body>
+</html>
+
+<script type="text/javascript" src="pako_inflate.min.js"></script>
+<script>
+
+    function CreateInflator()
+    {
+      var enable_windows_gzip=32;
+      inflator = new pako.Inflate({
+        to: 'string',
+        enable_windows_gzip
+      });
+      inflator.onData = FileChunkDecrypted;
+      inflator.onEnd = function(chunk)
+      {
+        CurrentFilePos -= inflator.strm.avail_in; //shift file reader by offset of next compression chunk
+        if (CurrentFilePos < 0) CurrentFilePos = 0;
+        CreateInflator(); //create new inflator
+      };
+    }
+    CreateInflator();
+
+    document.getElementById('files').addEventListener('change', Start, false);
+    var compare_len = 20;
+    function Start()
+    {
+        hashreads = [];
+        SeqLookup = [];
+
+        filter = document.getElementById('filter').value.split("\n");
+        randomstart = document.getElementById('randomstart').value*1;
+        files = document.getElementById('files').files; // FileList object
+        ref_orf = document.getElementById('ref_orf').value.toUpperCase();
+        ref_orf_offset = ref_orf.indexOf(filter[0].substr(randomstart,20));
+        flanking_length = document.getElementById('flanking_length').value*1;
+
+        //prepare hashreads array with all positions:
+        hashreads["wt"] = new Uint32Array(files.length);
+        var aminoacids = "ACDEFGHIKLMNPQRSTVWYx";
+        for (var f=1; f<filter.length; f++)
+        {
+            var NNK_pos = filter[f].indexOf("NN");
+            motif = Translate(filter[0].substr(NNK_pos,3))+((ref_orf_offset+NNK_pos-randomstart)/3+1);
+            for (var i=0; i<21; i++)
+            {
+                motif2 = motif+aminoacids[i];
+                if (motif[0] == aminoacids[i]) motif2 += "_syn";
+                hashreads[motif2] = new Uint32Array(files.length);
+            }
+            console.log(motif)
+        }
+
+        readnum = 0;
+        hitnum = 0;
+        filternum = 0;
+
+        chunksize = 1024*1024;
+        CurrentFileId = 0;
+        CurrentFilePos = 0;
+        RestFromLastChunk = "";
+        ReadNextFileChunk();
+    }
+
+    function ReadNextFileChunk()
+    {
+        reader = new FileReader();
+        reader.onload = FileReceived;
+
+        //check if .gz or not:
+        if (files[CurrentFileId].name.indexOf(".gz") != -1) reader.readAsArrayBuffer(files[CurrentFileId].slice(CurrentFilePos, CurrentFilePos+chunksize));
+        else reader.readAsText(files[CurrentFileId].slice(CurrentFilePos, CurrentFilePos+chunksize));
+
+        //progress display:
+        document.getElementById("help").innerHTML = "File "+(CurrentFileId+1)+": "+Math.round(CurrentFilePos/1000000)+" MB processed, "+Math.round(filternum/readnum*100*10)/10+"% mapped to filter, "+Math.round(hitnum/filternum*100*10)/10+"% mapped to BC."
+    }
+    var examplereads = "";
+    var readnum = 0, pamnum = 0, circnum = 0, shortnum = 0;
+    function FileReceived() //this function is called for every chunk of data.
+    {
+        //check if .gz or not:
+        if (files[CurrentFileId].name.indexOf(".gz") != -1) inflator.push(reader.result);
+        else DataReceived(reader.result);
+
+        reader.result = "";
+        reader = "";
+
+        //load the next chunk of data:
+        CurrentFilePos+=chunksize;
+        if (CurrentFilePos >= files[CurrentFileId].size) //end of file -> next file
+        {
+            CurrentFilePos = 0;
+            RestFromLastChunk = "";
+            CurrentFileId++;
+        }
+        if (CurrentFileId < files.length)
+        {
+          setTimeout("ReadNextFileChunk();",10); //attention: is it safe to assume that the offset by last inflator chunnk is already processed? is it safe to assume that the results are fed into the inflator in the right order?
+        }
+        else //last file is done
+        {
+          setTimeout("getCountTable();",10); //attention: is it safe to assume that the results of the last inflator chunk are processed already?
+        }
+    }
+    function FileChunkDecrypted(chunk)
+    {
+      DataReceived(chunk);
+    };
+
+
+
+    function DataReceived(input)
+    {
+        var original = RestFromLastChunk+input;
+        var cursor = 0, origlen = original.length;
+
+        var id = CurrentFileId;
+
+        while (true)
+        {
+            var cursor1 = cursor;
+            while (++cursor1<origlen && original[cursor1] != "\n");
+            var cursor2 = cursor1+1;
+            while (++cursor2<origlen && original[cursor2] != "\n");
+            var cursor3 = cursor2+1;
+            while (++cursor3<origlen && original[cursor3] != "\n");
+            var cursor4 = cursor3+1;
+            while (++cursor4<origlen && original[cursor4] != "\n");
+
+            if (cursor4 >= origlen) break;
+            else cursor = cursor4+1;
+            var read = original.slice(cursor1+1,cursor2);
+            var phred = original.slice(cursor3+1,cursor4);
+            var readlen = read.length;
+
+            //check against all NNK oligos:
+            var motif = "";
+            for (var f=1; f<filter.length; f++)
+            {
+                var NNK_pos = filter[f].indexOf("NN");
+                if (read.substr(NNK_pos-flanking_length,flanking_length) == filter[f].substr(NNK_pos-flanking_length,flanking_length))
+                    if (read.substr(NNK_pos+3,flanking_length) == filter[f].substr(NNK_pos+3,flanking_length).substr(0,read.length-(NNK_pos+3)))
+                        if (read.substr(NNK_pos,3) != "TAG") //exclude the bad stop codon
+                    {
+                        motif = Translate(filter[0].substr(NNK_pos,3))+((ref_orf_offset+NNK_pos-randomstart)/3+1)+Translate(read.substr(NNK_pos,3));
+                        if (motif[0] == motif[motif.length-1]) motif += "_syn";
+                    }
+            }
+
+            //count perfect wt:
+            var minlen = Math.min(read.length, filter[0].length);
+            if (read.substr(0,minlen) == filter[0].substr(0,minlen)) motif = "wt";
+
+            if (motif != "")
+            {
+              filternum++;
+              var set = CurrentFileId;
+              if (hashreads[motif] === undefined) hashreads[motif] = new Uint32Array(files.length);
+              if (hashreads[motif][set] < (2**32)-1) hashreads[motif][set]++;
+            }
+
+            readnum++;
+        }
+
+        RestFromLastChunk = original.substr(cursor);
+    }
+
+    function Final()
+    {
+        var out = "";
+
+        out += "Mutation\tPosition\tAmino acid";
+        for (var i=0; i<files.length; i++) out += "\t"+files[i].name;
+        out += "\tGroup_A\tGroup_B";
+        out += "\n";
+        for (var i in hashreads)
+        {
+          var sum = 0;
+          for (var f=0; f<files.length; f++) sum += hashreads[i][f];
+          {
+            out += i;
+
+            //pos and aa:
+            if (i != "wt")
+            {
+                var ii = i.replace("_syn","");
+                out += "\t"+ii.substr(1,ii.length-2);
+                out += "\t"+ii.substr(ii.length-1);
+            }
+            else out += "\t0\t-";
+
+            for (var f=0; f<files.length; f++) out += "\t" + hashreads[i][f];
+
+            //sum up in two groups:
+            var A=0, B=0;
+            for (var f=0; f<files.length; f++)
+                if (f < files.length/2)
+                    A += hashreads[i][f];
+                else
+                    B += hashreads[i][f];
+            out += "\t"+A+"\t"+B;
+
+            out += "\n";
+          }
+        }
+
+        var bb = new Blob([out], {type: 'application/octet-stream'});
+        var a = document.createElement('a');
+        a.download = "result.txt";
+        a.href = window.URL.createObjectURL(bb);
+        a.textContent = 'Klick here to save';
+        a.dataset.downloadurl = ['text/plain', a.download, a.href].join(':');
+
+        document.getElementById("save").appendChild(a);
+        a.click();
+    }
+
+    // Transform a sequence to a number
+    function MakeKmer(seq, k)
+    {
+        var out = 0;
+        var seqlen = seq.length;
+
+        //for (var i=8-1; i>=0; i--)
+        for (var i=0; i<k; i++)
+        {
+            if (i >= seqlen) return -1;
+
+            var here;
+            if (seq[i] == 'T') here = 0; else
+            if (seq[i] == 'C') here = 1; else
+            if (seq[i] == 'A') here = 2; else
+            /*if (seq[i] == 'G')*/ here = 3;
+
+            out *= 4;
+            out += here;
+        }
+        return out;
+    }
+
+    var GeneticCode = "FFLLSSSSYYxxCCxWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+    function Translate(seq)
+    {
+      var out = "";
+      for (var i=0; i<seq.length/3; i++) out += GeneticCode[MakeKmer(seq.substr(i*3,3),3)];
+      return out;
+    }
+
+</script>

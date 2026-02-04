@@ -1,0 +1,231 @@
+
+
+
+<!--
+==============================================================================
+
+Copyright 2021-2026 by Jonathan Schmid-Burgk
+
+==============================================================================
+-->
+
+
+<meta http-equiv="Content-Script-Type" content="text/javascript">
+<META HTTP-EQUIV="CACHE-CONTROL" CONTENT="NO-CACHE">
+    <html>
+        <style>
+            a:link {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+            a:visited {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+        </style>
+        <head>
+            <title>Codon optimization of binders for gene synthesis and cloning</title>
+        </head>
+        <body style="margin: 0; font-family: Helvetica; font-weight: 100; background-size: 200vw 200vh" background="brown1.jpg">
+            <div style="background-color: rgba(255,255,255,0.2); margin: 0.5%; padding: 1%; width: 97%; height: 100%">
+                <b>AI-Binder Screening Suite: CodonOptimizer v1</b>
+                <br>JSB Lab, University of Bonn
+                <br>jsb@uni-bonn.de
+
+                <br>
+                <br>Amino acid sequence of the binder or protein (may contain spaces):
+                <br><input id="design" value=""/>
+                <br>
+                <br>Exlude DNA sequences (comma separated, default: Esp3I):
+                <br><input id="exclude" value="CGTCTC"/>
+                <br>
+                <br>Cloning linker 5' (optional, default for GoldenGate cloning):
+                <br><input id="linker5" value="ccatccccgtctctcatg"/>
+                <br>
+                <br>Cloning linker 3' (optional, default for GoldenGate cloning):
+                <br><input id="linker3" value="ggcgagagacgcatgacg"/>
+                <br>
+                <br>Species for which to optimize the codons:
+                <br>
+                <select id="species">
+                    <option value="human">Human</option>
+                    <option value="ecoli">E. coli</option>
+                    <option value="human_ecoli">Human and E. coli</option>
+                </select>
+                <br>
+                <br><button onclick="start();">Start</button> (The GUI will freeze for a few seconds while optimizing the sequence)
+                <br>
+                <br>Output DNA sequence:
+                <br><div id="out" style="width:80%; word-wrap:break-word"></div>
+                <div id="save" style = "display:none">test</div>
+            </div>
+        </body>
+    </html>
+
+    <script>
+
+        best_repeat_len = -1, best_repeat_word = ""; //global damit man weiter iterieren kann
+
+        var plasmidseq, plasmidseq_revcom;
+        function start()
+        {
+            human_good_codons = ["*","TGA","*","TAA","A","GCC","A","GCT","A","GCA","C","TGC","C","TGT","D","GAC","D","GAT","E","GAG","E","GAA","F","TTC","F","TTT","G","GGC","G","GGA","G","GGG","H","CAC","H","CAT","I","ATC","I","ATT","K","AAG","K","AAA","L","CTG","M","ATG","N","AAC","N","AAT","P","CCC","P","CCT","P","CCA","Q","CAG","R","AGA","R","AGG","R","CGG","R","CGC","S","AGC","S","TCC","S","TCT","S","TCA","S","AGT","T","ACC","T","ACA","T","ACT","V","GTG","V","GTC","W","TGG","Y","TAC","Y","TAT"];
+            ecoli_good_codons = ["*","TAA","*","TGA","A","GCG","A","GCC","A","GCA","A","GCT","C","TGC","C","TGT","D","GAT","D","GAC","E","GAA","E","GAG","F","TTT","F","TTC","G","GGC","G","GGT","G","GGG","G","GGA","H","CAT","H","CAC","I","ATT","I","ATC","K","AAA","K","AAG","L","CTG","L","TTG","L","TTA","M","ATG","N","AAC","N","AAT","P","CCG","P","CCA","P","CCT","P","CCC","Q","CAG","Q","CAA","R","CGC","R","CGT","R","CGG","S","AGC","S","AGT","S","TCG","S","TCT","S","TCC","S","TCA","T","ACC","T","ACG","T","ACT","T","ACA","V","GTG","V","GTT","V","GTC","V","GTA","W","TGG","Y","TAT","Y","TAC"];
+            human_ecoli_good_codons = ["*","TGA","*","TAA","A","GCC","A","GCT","A","GCA","C","TGC","C","TGT","D","GAC","D","GAT","E","GAG","E","GAA","F","TTC","F","TTT","G","GGC","G","GGA","G","GGG","H","CAC","H","CAT","I","ATC","I","ATT","K","AAG","K","AAA","L","CTG","M","ATG","N","AAC","N","AAT","P","CCC","P","CCT","P","CCA","Q","CAG","R","CGG","R","CGC","S","AGC","S","TCC","S","TCT","S","TCA","S","AGT","T","ACC","T","ACA","T","ACT","V","GTG","V","GTC","W","TGG","Y","TAC","Y","TAT"];
+
+            //get gui data:
+            design = document.getElementById("design").value.toUpperCase();
+            exclude = document.getElementById("exclude").value.toUpperCase().split(",");
+            document.getElementById("out").innerHTML = "";
+            linker5 = document.getElementById("linker5").value;
+            linker3 = document.getElementById("linker3").value;
+
+            species = document.getElementById("species").value;
+            codon_table = [];
+            if (species == "human")
+                for (var i=0; i<human_good_codons.length/2; i++)
+                    codon_table.push([human_good_codons[i*2], human_good_codons[i*2+1]]);
+            if (species == "ecoli")
+                for (var i=0; i<ecoli_good_codons.length/2; i++)
+                    codon_table.push([ecoli_good_codons[i*2], ecoli_good_codons[i*2+1]]);
+            if (species == "human_ecoli")
+                for (var i=0; i<human_ecoli_good_codons.length/2; i++)
+                    codon_table.push([human_ecoli_good_codons[i*2], human_ecoli_good_codons[i*2+1]]);
+
+            var failed_base_repeats = 0;
+
+            for (var attempt = 0; attempt<2000; attempt++)
+            {
+                orf = "";
+                for (var pos=0; pos<design.length; pos++)
+                    if (design[pos] != " " && design[pos] != "X")
+                {
+                    codon = "???";
+                    for (var i=0; i<1000; i++)
+                    {
+                        r = Math.floor(Math.random()*codon_table.length);
+                        if (codon_table[r][0] == design[pos])
+                        {
+                            codon = codon_table[r][1];
+                        }
+                    }
+
+                    orf += codon;
+                }
+
+                ok = 1;
+
+                //check if the excluded sequences are not present:
+                for (var i=0; i<exclude.length; i++)
+                    if (exclude[i] != "")
+                {
+                    if (orf.indexOf(exclude[i]) != -1) ok = 0;
+                    if (orf.indexOf(ReverseComplement(exclude[i])) != -1) ok = 0;
+                }
+
+                //check that base repeats are not longer than 4 bases:
+                /*for (var i=0; i<orf.length-4; i++)
+                {
+                    base0 = orf[i];
+                    if (orf[i+1] == base0 &&
+                        orf[i+2] == base0 && 
+                        orf[i+3] == base0 && 
+                        orf[i+4] == base0)
+                    {
+                        ok = 0;
+                        failed_base_repeats++
+                    }
+                }*/
+
+                //check that the orf does not contain repeats of given length:
+                min_repeat_len = -1, min_repeat_word = "";
+                for (var test_repeat_len=30; test_repeat_len>=5; test_repeat_len--)
+                {
+                    repeat_index = [];
+                    repeat_found = 0;
+                    for (var i=0; i<orf.length-test_repeat_len; i++)
+                    {
+                        var word = orf.substr(i,test_repeat_len);
+                        if (repeat_index[word] === undefined) repeat_index[word] = 1;
+                        else
+                        {
+                            repeat_found = 1;
+                            min_repeat_word = word;
+                            break;
+                        }
+                    }
+                    if (repeat_found == 1)
+                    {
+                        min_repeat_len = test_repeat_len;
+                        break;
+                    }
+                }
+
+                if (best_repeat_len == -1 || min_repeat_len < best_repeat_len)
+                    if (ok)
+                {
+                    best_repeat_len = min_repeat_len;
+                    best_repeat_word = min_repeat_word;
+                    document.getElementById("out").innerHTML = linker5+orf+linker3;
+                }
+
+                console.log("attempt "+attempt+" best_repeat_len: "+best_repeat_len+" repeat: "+best_repeat_word);
+            }
+            alert("Maximum repeat length (the smaller the better for synthesis): "+best_repeat_len);
+        }
+
+        function LongestRepeat(seq)
+        {
+            for (var repeat_len=30; repeat_len>5; repeat_len--)
+            {
+                repeat_index = [];
+                for (var i=0; i<seq.length-repeat_len; i++)
+                {
+                    var word = seq.substr(i,repeat_len);
+                    if (repeat_index[word] === undefined) repeat_index[word] = 1;
+                    else
+                    {
+                        console.log(word);
+                        return repeat_len;
+                    }
+                }
+            }
+            return 0;
+        }
+
+        function ReverseComplement(A)
+        {
+            var dummy = "";
+            for (var i=0; i<A.length; i++)
+            {
+                if (A[A.length-1-i] == 'G') dummy += 'C';
+                if (A[A.length-1-i] == 'A') dummy += 'T';
+                if (A[A.length-1-i] == 'T') dummy += 'A';
+                if (A[A.length-1-i] == 'C') dummy += 'G';
+            }
+            return dummy;
+        }
+
+        var GeneticCode = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+        function Translate(seq)
+        {
+          var out = "";
+          for (var i=0; i<seq.length/3; i++) out += GeneticCode[MakeKmer(seq.substr(i*3,3),3)];
+          return out;
+        }
+
+        function SaveFile(data, filename)
+        {
+          var bb = new Blob([data], {type: 'text/plain'});
+          var a = document.createElement('a');
+          a.download = filename;
+          a.href = window.URL.createObjectURL(bb);
+          a.textContent = 'Klick here to save';
+          a.dataset.downloadurl = ['text/plain', a.download, a.href].join(':');
+          document.getElementById("save").appendChild(a);
+          a.click();
+        }
+
+    </script>

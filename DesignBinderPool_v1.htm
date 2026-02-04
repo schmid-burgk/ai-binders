@@ -1,0 +1,128 @@
+
+
+
+<!--
+==============================================================================
+
+Copyright 2021-2026 by Jonathan Schmid-Burgk
+
+==============================================================================
+-->
+
+
+<meta http-equiv="Content-Script-Type" content="text/javascript">
+<META HTTP-EQUIV="CACHE-CONTROL" CONTENT="NO-CACHE">
+    <html>
+        <style>
+            a:link {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+            a:visited {
+              color: black;
+              background-color: transparent;
+              text-decoration: underline;
+            }
+        </style>
+        <head>
+            <title>Design binder pool v1</title>
+        </head>
+        <body style="margin: 0; font-family: Helvetica; font-weight: 100; background-size: 200vw 200vh" background="brown1.jpg">
+            <div style="background-color: rgba(255,255,255,0.2); margin: 0.5%; padding: 1%; width: 97%; height: 100%">
+                <b>AI-Binder Screening Suite: DesignBinderPool v1</b>
+                <br>JSB Lab, University of Bonn
+                <br>jsb@uni-bonn.de
+
+                <br>
+                <br>Paste a list of binder sequences:
+                <br><textarea id="input1"></textarea>
+
+                <br>
+                <br>Species for which to optimize the codons:
+                <br>
+                <select id="species">
+                    <option value="human">Human</option>
+                    <option value="ecoli">E. coli</option>
+                </select>
+                <br>
+                <br>
+                <button onclick="start();">Start</button>
+
+                <div id="save" style = "display:none"></div>
+            </div>
+            
+        </body>
+    </html>
+
+    <script>
+
+        function start()
+        {
+            human_good_codons = ["*","TGA","*","TAA","A","GCC","A","GCT","A","GCA","C","TGC","C","TGT","D","GAC","D","GAT","E","GAG","E","GAA","F","TTC","F","TTT","G","GGC","G","GGA","G","GGG","H","CAC","H","CAT","I","ATC","I","ATT","K","AAG","K","AAA","L","CTG","M","ATG","N","AAC","N","AAT","P","CCC","P","CCT","P","CCA","Q","CAG","R","AGA","R","AGG","R","CGG","R","CGC","S","AGC","S","TCC","S","TCT","S","TCA","S","AGT","T","ACC","T","ACA","T","ACT","V","GTG","V","GTC","W","TGG","Y","TAC","Y","TAT"];
+            ecoli_good_codons = ["*","TAA","*","TGA","A","GCG","A","GCC","A","GCA","A","GCT","C","TGC","C","TGT","D","GAT","D","GAC","E","GAA","E","GAG","F","TTT","F","TTC","G","GGC","G","GGT","G","GGG","G","GGA","H","CAT","H","CAC","I","ATT","I","ATC","K","AAA","K","AAG","L","CTG","L","TTG","L","TTA","M","ATG","N","AAC","N","AAT","P","CCG","P","CCA","P","CCT","P","CCC","Q","CAG","Q","CAA","R","CGC","R","CGT","R","CGG","S","AGC","S","AGT","S","TCG","S","TCT","S","TCC","S","TCA","T","ACC","T","ACG","T","ACT","T","ACA","V","GTG","V","GTT","V","GTC","V","GTA","W","TGG","Y","TAT","Y","TAC"];
+
+            //get gui data:
+            var input1 = document.getElementById("input1").value.replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n");
+            species = document.getElementById("species").value;
+            codon_table = [];
+            if (species == "human")
+                for (var i=0; i<human_good_codons.length/2; i++)
+                    codon_table.push([human_good_codons[i*2], human_good_codons[i*2+1]]);
+            if (species == "ecoli")
+                for (var i=0; i<ecoli_good_codons.length/2; i++)
+                    codon_table.push([ecoli_good_codons[i*2], ecoli_good_codons[i*2+1]]);
+
+            var out = "protein sequence\treverse translated\toligo\n";
+
+            for (var l=0; l<input1.length; l++)
+            {
+                var seq = input1[l];
+
+                if (seq)
+                {
+                    var found = 0;
+                    for (var attempt=0; attempt<100; attempt++)
+                    {
+                        var reverse_translated = "";
+
+                        //go through seq:
+                        for (var pos=0; pos<seq.length; pos++)
+                        {
+                            //go through codons, retrieve matching:
+                            var codons = [];
+                            for (var c=0; c<codon_table.length; c++) if (seq[pos] == codon_table[c][0]) codons.push(codon_table[c][1]);
+                            var pick = Math.floor(Math.random()*codons.length);
+                            reverse_translated += codons[pick];
+                        }
+
+                        //check for Esp3i:
+                        if (reverse_translated.indexOf("CGTCTC") == -1 && reverse_translated.indexOf("GAGACG") == -1)
+                        {
+                            var oligo = "CCATCCCCGTCTCTCATG"+reverse_translated+"GGCGAGAGACGCATGACG";
+
+                            out += seq+"\t"+reverse_translated+"\t"+oligo+"\n";
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (found == 0) out += seq+"\t"+"no sequence without Esp3I found"+"\n";
+                }
+            }
+
+            SaveFile(out, "oligo_pool.txt");
+        }
+
+        function SaveFile(data, name)
+        {
+            var bb = new Blob([data], {type: 'application/octet-stream'});
+            var a = document.createElement('a');
+            a.download = name;
+            a.href = window.URL.createObjectURL(bb);
+            a.textContent = 'Klick here to save';
+            a.dataset.downloadurl = ['text/plain', a.download, a.href].join(':');
+            document.getElementById("save").appendChild(a);
+            a.click();           
+        }
+
+    </script>
